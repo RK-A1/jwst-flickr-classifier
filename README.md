@@ -1,197 +1,103 @@
 # JWST Image Pipeline
 
-A local data pipeline that ingests James Webb Space Telescope photos from Flickr, stores metadata and feature embeddings in DuckDB, and trains image classifiers to categorise JWST imagery by subject type.
-
 **Author:** RK
 
----
+A local pipeline that pulls James Webb Space Telescope photos from Flickr, extracts deep learning features, and trains image classifiers to categorise JWST imagery by subject type.
 
-## Overview
-
-```
-Flickr API (nasawebbtelescope account)
-        │
-        ▼
-  Airflow DAG (Astro CLI)
-        │
-        ├─── Download images → include/images/
-        ├─── Extract metadata → DuckDB (photos table)
-        └─── Extract ResNet50 embeddings → DuckDB (photos.embedding column)
-                │
-                ▼
-        ML Training
-        ├─── ResNet features → XGBoost classifier
-        └─── Fine-tuned ResNet50 (end-to-end, MPS backend)
-```
-
-Photos are classified into six subject categories: **galaxy**, **galaxy cluster**, **nebula**, **star**, **solar system**, and **exoplanet**. Labels are derived from Flickr tags via a consolidation script, then used to train classifiers. Inference is gated by a confidence threshold (0.6) — low-confidence predictions are stored as `unclassified` rather than forced into a wrong class.
+![Cat's Paw Nebula (NGC 6334) captured by Webb + Chandra](assets/example_nebula.jpg)
+*Cat's Paw Nebula (NGC 6334) — Webb + Chandra. Classified: **nebula**.*
 
 ---
 
-## Tech Stack
+## What it does
 
-| Component | Tool |
-|-----------|------|
-| Orchestration | Apache Airflow via [Astro CLI](https://docs.astronomer.io/astro/cli/overview) |
-| Storage | [DuckDB](https://duckdb.org/) |
-| Feature extraction | ResNet50 (torchvision, `IMAGENET1K_V2` weights) |
-| Classifier | XGBoost (on ResNet features) + fine-tuned ResNet50 |
-| Compute | PyTorch with MPS backend (Apple Silicon) |
-| Image source | Flickr API — `nasawebbtelescope` account |
+1. **Ingest** — downloads JWST photos from the NASA Webb Flickr account into DuckDB
+2. **Embed** — runs each image through ResNet50 to produce a 2048-dim feature vector
+3. **Label** — maps Flickr tags to canonical subject classes (nebula, galaxy, star, etc.)
+4. **Train** — fits an XGBoost classifier on the embeddings; also fine-tunes ResNet50 end-to-end
+5. **Predict** — runs inference on new photos, storing predictions back to DuckDB
 
----
-
-## Prerequisites
-
-- macOS with Apple Silicon (MPS acceleration)
-- [Astro CLI](https://docs.astronomer.io/astro/cli/install-cli)
-- Docker Desktop
-- A Flickr API key ([apply here](https://www.flickr.com/services/api/misc.api_keys.html))
+Predictions with confidence below 0.6 are stored as `unclassified` rather than forced into a wrong class.
 
 ---
 
-## Setup
+## Stack
 
-**1. Clone the repo**
+- **Orchestration:** Apache Airflow ([Astro CLI](https://docs.astronomer.io/astro/cli/overview))
+- **Storage:** DuckDB
+- **ML:** PyTorch (MPS / Apple Silicon), XGBoost, scikit-learn
+- **Features:** ResNet50 `IMAGENET1K_V2` → 2048-dim embeddings
+- **Source:** Flickr API, `nasawebbtelescope` account
+
+---
+
+## Quick start
+
+**Prerequisites:** macOS (Apple Silicon), [Astro CLI](https://docs.astronomer.io/astro/cli/install-cli), Docker Desktop, Flickr API key.
 
 ```bash
-git clone <repo-url>
-cd JWST2
-```
+# 1. Clone
+git clone https://github.com/RK-A1/JWST.git && cd JWST
 
-**2. Add your Flickr API key**
+# 2. Add your Flickr API key
+echo "FLICKR_API_KEY=your_key_here" > .env
 
-Create a `.env` file in the project root:
-
-```
-FLICKR_API_KEY=your_key_here
-```
-
-This file is gitignored and loaded automatically by Astro CLI.
-
-**3. Start Airflow**
-
-```bash
+# 3. Start Airflow (http://localhost:8080 — admin / admin)
 astro dev start
-```
 
-Airflow UI is available at [http://localhost:8080](http://localhost:8080) (admin / admin).
-
----
-
-## Running the Pipeline
-
-### Step 1 — Ingest photos
-
-Trigger the ingest DAG to download photos from Flickr and populate DuckDB:
-
-```bash
+# 4. Run the pipeline in order
 astro dev run airflow dags trigger jwst_flickr_ingest
-```
-
-By default, the DAG fetches the latest 1000 photos. To ingest the full archive (~4000 photos), set `MAX_PHOTOS = None` in `dags/jwst_flickr_ingest.py`.
-
-### Step 2 — Extract embeddings
-
-```bash
 astro dev run airflow dags trigger jwst_feature_extraction
-```
-
-Runs ResNet50 (MPS-accelerated) over all downloaded images and stores 2048-dim feature vectors in DuckDB. Batched at 32 images, max 2 concurrent batches to avoid OOM.
-
-### Step 3 — Consolidate labels
-
-```bash
 python include/tag_consolidation.py
-```
-
-Maps raw Flickr tags to canonical subject labels (`galaxy`, `nebula`, etc.) and writes them to the `canonical_label` column.
-
-### Step 4 — Train classifiers
-
-```bash
 astro dev run airflow dags trigger jwst_train_classifiers
 ```
 
-Trains an XGBoost classifier on ResNet features and fine-tunes ResNet50 end-to-end. Checkpoints are saved to `include/models/`. Results are logged to the `training_runs` table.
-
-### Step 5 — Run inference
-
-Inference runs automatically at the end of each `jwst_flickr_ingest` run (the `predict_labels` task). It loads the best model from `training_runs` and writes predictions to `photos.predicted_label`.
+Inference runs automatically at the end of each ingest.
 
 ---
 
-## Project Structure
+## Project layout
 
 ```
-JWST2/
-├── dags/
-│   ├── jwst_flickr_ingest.py        # Ingest + inference DAG
-│   ├── jwst_feature_extraction.py   # ResNet50 embedding DAG
-│   └── jwst_train_classifiers.py    # XGBoost + ResNet fine-tune DAG
-├── include/
-│   ├── db.py                        # DuckDB connection helper + schema
-│   ├── tag_consolidation.py         # Tag → canonical label mapping
-│   ├── images/                      # Downloaded images (gitignored)
-│   ├── models/                      # Saved model checkpoints (gitignored)
-│   └── jwst.duckdb                  # Primary database (gitignored)
-├── Dockerfile                       # Astro Runtime base image
-├── requirements.txt                 # Python dependencies
-└── .env                             # API keys — never commit (gitignored)
+dags/
+  jwst_flickr_ingest.py        # download photos + run inference
+  jwst_feature_extraction.py   # ResNet50 embeddings
+  jwst_train_classifiers.py    # XGBoost + fine-tuned ResNet
+include/
+  db.py                        # DuckDB connection + schema
+  tag_consolidation.py         # Flickr tags → canonical labels
+  images/                      # downloaded images (gitignored)
+  models/                      # model checkpoints (gitignored)
+  jwst.duckdb                  # database (gitignored)
+assets/
+  example_nebula.jpg           # sample image used in this README
 ```
 
 ---
 
-## Database Schema
+## Database schema
 
 ```sql
-CREATE TABLE photos (
-    photo_id        TEXT PRIMARY KEY,
-    title           TEXT,
-    description     TEXT,
-    tags            TEXT[],
-    image_path      TEXT,
-    date_taken      TIMESTAMP,
-    date_ingested   TIMESTAMP DEFAULT current_timestamp,
-    embedding       FLOAT[],          -- ResNet50 2048-dim vector
-    canonical_label TEXT,             -- ground truth from tag consolidation
-    predicted_label TEXT              -- model prediction (or 'unclassified')
-);
+photos (photo_id, title, description, tags, image_path,
+        date_taken, date_ingested,
+        embedding FLOAT[],       -- 2048-dim ResNet50 vector
+        canonical_label TEXT,    -- ground truth from tag consolidation
+        predicted_label TEXT)    -- model output
 
-CREATE TABLE training_runs (
-    run_id      TEXT PRIMARY KEY,
-    ts          TIMESTAMP DEFAULT current_timestamp,
-    model_type  TEXT,                 -- 'xgboost' or 'resnet_finetune'
-    accuracy    DOUBLE,
-    f1_score    DOUBLE,
-    model_path  TEXT
-);
+training_runs (run_id, ts, model_type, accuracy, f1_score, model_path)
 ```
 
 ---
 
-## Useful Commands
+## Useful queries
 
 ```bash
-# Stop/start Airflow
-astro dev stop
-astro dev start
+# Photo counts by predicted class
+duckdb include/jwst.duckdb \
+  "SELECT predicted_label, count(*) n FROM photos GROUP BY 1 ORDER BY 2 DESC"
 
-# Query the database directly
-duckdb include/jwst.duckdb "SELECT count(*) FROM photos"
-duckdb include/jwst.duckdb "SELECT canonical_label, count(*) FROM photos GROUP BY 1 ORDER BY 2 DESC"
-duckdb include/jwst.duckdb "SELECT canonical_label, predicted_label, count(*) FROM photos GROUP BY 1, 2 ORDER BY 1, 3 DESC"
-
-# Reset and re-ingest from scratch
-duckdb include/jwst.duckdb "DELETE FROM photos"
+# Accuracy vs ground truth
+duckdb include/jwst.duckdb \
+  "SELECT round(100.0 * sum(predicted_label = canonical_label) / count(*), 1) AS pct_match
+   FROM photos WHERE canonical_label IS NOT NULL AND predicted_label IS NOT NULL"
 ```
-
----
-
-## Notes
-
-- **DuckDB is single-writer.** All writes go through a single Airflow task; reads use `read_only=True`.
-- **`include/` only.** Astro CLI mounts `dags/`, `plugins/`, `include/`, and `tests/` into containers. All persistent data lives in `include/` for this reason.
-- **`docker-compose.override.yml` does not work** with Astro CLI — Astro generates its compose config internally.
-- **JWST images exceed PIL's default decompression bomb limit.** `Image.MAX_IMAGE_PIXELS = None` is set wherever images are opened.
-- **MPS fallback.** All torch code checks `torch.backends.mps.is_available()` and falls back to CPU gracefully.
