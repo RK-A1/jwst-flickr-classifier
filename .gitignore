@@ -1,0 +1,36 @@
+# Environment / secrets
+.env
+
+# macOS
+.DS_Store
+
+# Astro / Airflow runtime files
+airflow-webserver.pid
+webserver_config.py
+airflow.cfg
+airflow.db
+.astro/config.yaml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+
+# Project data — large files, never commit
+include/images/*
+!include/images/.gitkeep
+include/*.duckdb
+include/*.duckdb.wal
+
+# ML artefacts — keep the placeholder but ignore everything else
+include/models/*
+!include/models/.gitkeep
+include/.torch_cache/
+
+# Legacy data directory (pre-refactor)
+data/
+
+# Claude Code session files
+.claude/
