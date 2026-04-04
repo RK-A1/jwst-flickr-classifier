@@ -17,7 +17,6 @@ ImageNet normalisation is applied so the pretrained weights are used correctly:
 """
 
 import logging
-import math
 from pathlib import Path
 
 from airflow.sdk import dag, task

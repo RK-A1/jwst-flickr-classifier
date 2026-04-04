@@ -189,7 +189,6 @@ def jwst_train_classifiers():
         import numpy as np
         import xgboost as xgb
         from sklearn.metrics import accuracy_score, f1_score
-        from sklearn.preprocessing import LabelEncoder
         from include.db import get_conn
 
         run_id = f"xgboost_{uuid.uuid4().hex[:8]}"
@@ -256,7 +255,6 @@ def jwst_train_classifiers():
 
         log.info("XGBoost  accuracy=%.4f  weighted-F1=%.4f", accuracy, f1)
 
-        classes = split["classes"]
         int_to_label = {v: k for k, v in label_to_int.items()}
         from sklearn.metrics import classification_report
         log.info(
@@ -436,7 +434,7 @@ def jwst_train_classifiers():
             train_loss = 0.0
             for imgs, lbls in train_loader:
                 imgs = imgs.to(device)
-                lbls = lbls.clone().detach().to(device) if isinstance(lbls, torch.Tensor) else torch.tensor(lbls).to(device)
+                lbls = lbls.to(device)
                 optimizer.zero_grad()
                 loss = criterion(model(imgs), lbls)
                 loss.backward()
@@ -450,7 +448,7 @@ def jwst_train_classifiers():
             with torch.no_grad():
                 for imgs, lbls in test_loader:
                     imgs = imgs.to(device)
-                    lbls = lbls.clone().detach().to(device) if isinstance(lbls, torch.Tensor) else torch.tensor(lbls).to(device)
+                    lbls = lbls.to(device)
                     val_loss += criterion(model(imgs), lbls).item() * len(imgs)
             val_loss /= len(test_records)
 
@@ -483,7 +481,7 @@ def jwst_train_classifiers():
                 imgs = imgs.to(device)
                 preds = model(imgs).argmax(dim=1).cpu().tolist()
                 all_preds.extend(preds)
-                all_true.extend(lbls if isinstance(lbls, list) else lbls.tolist())
+                all_true.extend(lbls.tolist())
 
         accuracy = float(accuracy_score(all_true, all_preds))
         f1       = float(f1_score(all_true, all_preds, average="weighted", zero_division=0))

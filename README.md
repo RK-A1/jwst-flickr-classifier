@@ -56,9 +56,34 @@ Inference runs automatically at the end of each ingest.
 
 ---
 
+## Explorer app
+
+A Streamlit data browser for exploring the pipeline without touching the command line.
+
+```bash
+# Install dependencies (first time only)
+pip install streamlit plotly duckdb pandas
+
+streamlit run app.py
+```
+
+Opens at `http://localhost:8501`. Connects to `include/jwst.duckdb` in read-only mode and can run while Airflow is active.
+
+| Page | What it shows |
+|------|---------------|
+| **Overview** | Photo, embedding, and label counts; label distribution charts; training run history |
+| **Photo Browser** | Filterable, paginated image grid with a detail panel |
+| **Similarity Search** | Finds the 8 most visually similar photos using cosine similarity over ResNet50 embeddings |
+| **Model Performance** | Per-class accuracy bar chart and confusion matrix heatmap |
+
+![JWST Explorer demo](assets/demo.gif)
+
+---
+
 ## Project layout
 
 ```
+app.py                         # Streamlit explorer app
 dags/
   jwst_flickr_ingest.py        # download photos + run inference
   jwst_feature_extraction.py   # ResNet50 embeddings
@@ -71,6 +96,10 @@ include/
   jwst.duckdb                  # database (gitignored)
 assets/
   example_nebula.jpg           # sample image used in this README
+  screenshot_overview.png      # individual page screenshots
+  screenshot_browser.png
+  screenshot_similarity.png
+  demo.gif                     # animated demo used in this README
 ```
 
 ---
