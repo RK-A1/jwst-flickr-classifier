@@ -4,10 +4,11 @@ jwst_flickr_ingest — Daily incremental ingestion of JWST photos from Flickr.
 Pipeline:
   ensure_schema
       │
-  get_watermark          ← MAX(date_taken) from DuckDB, 0 on first run
+  get_existing_ids       ← all photo_ids already in DuckDB
       │
-  fetch_photos_metadata  ← paginate flickr.people.getPublicPhotos,
-      │                    then flickr.photos.getInfo for tags/description
+  fetch_photos_metadata  ← paginate flickr.people.getPublicPhotos for ALL photos,
+      │                    diff against existing IDs, then flickr.photos.getInfo
+      │                    for each new photo's tags/description
   download_images        ← fetch largest available size → include/images/{id}.jpg
       │
   insert_records         ← upsert into DuckDB photos table
@@ -31,7 +32,6 @@ log = logging.getLogger(__name__)
 FLICKR_USER = "nasawebbtelescope"
 IMAGES_DIR = Path(__file__).resolve().parents[1] / "include" / "images"
 PER_PAGE = 500
-MAX_PHOTOS = 1000  # Set to None to fetch all
 # Preferred download sizes, largest first
 _SIZE_PREFERENCE = [
     "Original",
@@ -184,28 +184,23 @@ def jwst_flickr_ingest():
         log.info("Schema ready at %s", DB_PATH)
 
     @task
-    def get_watermark() -> int:
-        """
-        Return the Unix timestamp of the most recently ingested photo's
-        date_taken, or 0 if the table is empty (triggers a full backfill).
-        """
+    def get_existing_ids() -> list[str]:
+        """Return all photo_ids already in DuckDB."""
         from include.db import get_conn
 
         con = get_conn(read_only=True)
-        row = con.execute(
-            "SELECT COALESCE(EPOCH(MAX(date_taken))::BIGINT, 0) FROM photos"
-        ).fetchone()
+        rows = con.execute("SELECT photo_id FROM photos").fetchall()
         con.close()
-        ts = row[0] if row else 0
-        log.info("Watermark timestamp: %s", ts)
-        return int(ts)
+        ids = [r[0] for r in rows]
+        log.info("Existing photos in DB: %d", len(ids))
+        return ids
 
     @task
-    def fetch_photos_metadata(min_taken_ts: int) -> list[dict]:
+    def fetch_photos_metadata(existing_ids: list[str]) -> list[dict]:
         """
-        Paginate flickr.people.getPublicPhotos for all photos newer than
-        min_taken_ts, then call flickr.photos.getInfo for each to get
-        the full tag list, description, and taken date.
+        Paginate flickr.people.getPublicPhotos for ALL photos, filter out
+        IDs already in DuckDB, then call flickr.photos.getInfo for each
+        new photo to get the full tag list, description, and taken date.
 
         Returns a list of dicts ready for download_images / insert_records.
         """
@@ -216,50 +211,46 @@ def jwst_flickr_ingest():
         user_id = user_resp["user"]["id"]
         log.info("Resolved '%s' → NSID %s", FLICKR_USER, user_id)
 
-        # ── 1. Collect photo IDs via paginated getPublicPhotos ──────────────
-        photo_ids: list[str] = []
+        # ── 1. Collect ALL photo IDs via paginated getPublicPhotos ──────────
+        all_ids: list[str] = []
         page = 1
         while True:
-            kwargs: dict = dict(
-                user_id=user_id,
-                extras="date_taken",
-                per_page=PER_PAGE,
-                page=page,
-                sort="date-taken-desc",
+            resp = flickr.people.getPublicPhotos(
+                user_id=user_id, per_page=PER_PAGE, page=page,
             )
-            if min_taken_ts:
-                # Flickr accepts Unix timestamp or MySQL datetime string
-                kwargs["min_taken_date"] = min_taken_ts
-
-            resp = flickr.people.getPublicPhotos(**kwargs)
             page_data = resp["photos"]
             batch = page_data["photo"]
             total_pages = page_data["pages"]
 
-            photo_ids.extend(p["id"] for p in batch)
+            all_ids.extend(p["id"] for p in batch)
             log.info(
                 "getPublicPhotos page %d/%d: %d photos (running total %d)",
                 page,
                 total_pages,
                 len(batch),
-                len(photo_ids),
+                len(all_ids),
             )
-
-            if MAX_PHOTOS and len(photo_ids) >= MAX_PHOTOS:
-                photo_ids = photo_ids[:MAX_PHOTOS]
-                log.info("MAX_PHOTOS=%d reached, stopping pagination", MAX_PHOTOS)
-                break
 
             if page >= total_pages:
                 break
             page += 1
             time.sleep(0.3)  # ~3 req/s, well under the 3600 req/hr cap
 
-        log.info("Total photos to process: %d", len(photo_ids))
+        # ── 2. Filter to only new photos ────────────────────────────────────
+        existing_set = set(existing_ids)
+        new_ids = [pid for pid in all_ids if pid not in existing_set]
+        log.info(
+            "Flickr total: %d | Already in DB: %d | New: %d",
+            len(all_ids), len(existing_set), len(new_ids),
+        )
 
-        # ── 2. Call getInfo for each photo to get tags + full metadata ───────
+        if not new_ids:
+            log.info("No new photos to ingest.")
+            return []
+
+        # ── 3. Call getInfo for each new photo to get tags + metadata ───────
         results: list[dict] = []
-        for photo_id in photo_ids:
+        for photo_id in new_ids:
             try:
                 info = flickr.photos.getInfo(photo_id=photo_id)["photo"]
 
@@ -282,7 +273,7 @@ def jwst_flickr_ingest():
 
             time.sleep(0.3)
 
-        log.info("Successfully fetched metadata for %d photos", len(results))
+        log.info("Successfully fetched metadata for %d new photos", len(results))
         return results
 
     @task
@@ -531,15 +522,15 @@ def jwst_flickr_ingest():
         return updated
 
     # ── Wire up the DAG ───────────────────────────────────────────────────────
-    schema    = ensure_schema()
-    watermark = get_watermark()
-    metadata  = fetch_photos_metadata(watermark)
-    downloaded = download_images(metadata)
-    inserted  = insert_records(downloaded)
+    schema      = ensure_schema()
+    existing    = get_existing_ids()
+    metadata    = fetch_photos_metadata(existing)
+    downloaded  = download_images(metadata)
+    inserted    = insert_records(downloaded)
     predict_labels(inserted)
 
-    # ensure_schema must complete before we query the table for the watermark
-    schema >> watermark
+    # ensure_schema must complete before we query the table for existing IDs
+    schema >> existing
 
 
 jwst_flickr_ingest()

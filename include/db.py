@@ -8,7 +8,6 @@ Usage:
     con = get_conn(read_only=True)  # safe for parallel reads
 """
 
-import os
 from pathlib import Path
 import duckdb
 

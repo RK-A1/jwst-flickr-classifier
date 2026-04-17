@@ -9,9 +9,22 @@ A local pipeline that pulls James Webb Space Telescope photos from Flickr, extra
 
 ---
 
+## Current status
+
+| Metric | Count |
+|--------|------:|
+| Total photos | 4,342 |
+| With embeddings | 4,333 |
+| With predictions | 4,333 |
+| Canonical (tag-based) labels | 979 |
+
+Best model: **ResNet50 fine-tuned** — 82.4% accuracy, 82.2% weighted F1.
+
+---
+
 ## What it does
 
-1. **Ingest** — downloads JWST photos from the NASA Webb Flickr account into DuckDB
+1. **Ingest** — fetches all photo IDs from the NASA Webb Flickr account, diffs against what's already in DuckDB, and downloads only new photos
 2. **Embed** — runs each image through ResNet50 to produce a 2048-dim feature vector
 3. **Label** — maps Flickr tags to canonical subject classes (nebula, galaxy, star, etc.)
 4. **Train** — fits an XGBoost classifier on the embeddings; also fine-tunes ResNet50 end-to-end
@@ -26,7 +39,7 @@ Predictions with confidence below 0.6 are stored as `unclassified` rather than f
 - **Orchestration:** Apache Airflow ([Astro CLI](https://docs.astronomer.io/astro/cli/overview))
 - **Storage:** DuckDB
 - **ML:** PyTorch (MPS / Apple Silicon), XGBoost, scikit-learn
-- **Features:** ResNet50 `IMAGENET1K_V2` → 2048-dim embeddings
+- **Features:** ResNet50 `IMAGENET1K_V2` — 2048-dim embeddings
 - **Source:** Flickr API, `nasawebbtelescope` account
 
 ---
@@ -48,7 +61,7 @@ astro dev start
 # 4. Run the pipeline in order
 astro dev run airflow dags trigger jwst_flickr_ingest
 astro dev run airflow dags trigger jwst_feature_extraction
-python include/tag_consolidation.py
+python include/tag_consolidation.py --apply
 astro dev run airflow dags trigger jwst_train_classifiers
 ```
 

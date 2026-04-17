@@ -1,161 +1,90 @@
-# JWST Image Pipeline
+# CLAUDE.md
 
-Local data pipeline on macOS (M4 MacBook Air) that ingests James Webb Space Telescope photos from Flickr, stores metadata and image embeddings in DuckDB, and trains image classifiers.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Architecture
+## Project Overview
 
-```
-Flickr API (nasawebbtelescope account)
-        │
-        ▼
-  Airflow DAG (Astro CLI)
-        │
-        ├─── Download images → include/images/
-        ├─── Extract metadata → DuckDB (photos table)
-        └─── Extract ResNet embeddings → DuckDB (photos.embedding column)
-                │
-                ▼
-        ML Training
-        ├─── ResNet features → XGBoost classifier
-        └─── Fine-tuned ResNet (end-to-end, MPS backend)
-```
-
-## Tech Stack
-
-- **Orchestration:** Apache Airflow via [Astro CLI](https://docs.astronomer.io/astro/cli/overview) (`astro dev start/stop`)
-- **Storage:** DuckDB at `include/jwst.duckdb`
-- **ML:** PyTorch (MPS backend for Apple Silicon), XGBoost
-- **Feature extraction:** ResNet (torchvision) — embeddings stored in DuckDB
-- **API:** Flickr API, account `nasawebbtelescope`
-- **Python:** 3.12 (Astro CLI container)
-
-## Environment
-
-The Flickr API key must be set in `.env` at the project root (Astro CLI loads this automatically into containers):
-
-```
-FLICKR_API_KEY=<your_key>
-```
-
-`.env` is gitignored. Never commit it.
-
-## Key Paths
-
-| Path | Purpose |
-|------|---------|
-| `include/jwst.duckdb` | Primary database |
-| `include/images/` | Downloaded raw images |
-| `include/models/` | Saved model checkpoints |
-| `include/.torch_cache/` | Cached ResNet50 weights (persists across container restarts) |
-| `dags/` | Airflow DAGs |
-| `include/` | Shared Python modules + data (on Python path, mounted by Astro CLI) |
-
-> **Why `include/` for data?** Astro CLI only mounts `dags/`, `plugins/`, `include/`, and `tests/` into containers. `data/` is not mounted, so the database and images live in `include/` to persist to the host filesystem.
-
-## DuckDB Schema
-
-```sql
-CREATE TABLE photos (
-    photo_id        TEXT PRIMARY KEY,
-    title           TEXT,
-    description     TEXT,
-    tags            TEXT[],           -- list of tag strings
-    image_path      TEXT,             -- absolute path to local file
-    date_taken      TIMESTAMP,
-    date_ingested   TIMESTAMP DEFAULT current_timestamp,
-    embedding       FLOAT[],          -- ResNet feature vector (2048-dim)
-    canonical_label TEXT,             -- tag-based label set by tag_consolidation.py
-    predicted_label TEXT
-);
-
-CREATE TABLE training_runs (
-    run_id      TEXT PRIMARY KEY,
-    ts          TIMESTAMP DEFAULT current_timestamp,
-    model_type  TEXT,                 -- 'xgboost' or 'resnet_finetune'
-    accuracy    DOUBLE,
-    f1_score    DOUBLE,
-    model_path  TEXT
-);
-```
-
-## Airflow DAGs
-
-### `jwst_flickr_ingest` — Daily ingestion
-1. `ensure_schema` — create DuckDB tables if missing
-2. `get_watermark` — read MAX(date_taken) from photos table (0 on first run)
-3. `fetch_photos_metadata` — paginate Flickr API for photos newer than watermark
-4. `download_images` — fetch largest available size → `include/images/{photo_id}.jpg`
-5. `insert_records` — upsert metadata into `photos` table
-6. `predict_labels` — run inference on photos with embeddings but no predicted_label
-
-**Key constants in the DAG:**
-- `MAX_PHOTOS = 1000` — cap per run; set to `None` for full backfill
-- `PER_PAGE = 500` — Flickr page size
-- Sort order: `date-taken-desc` (newest first)
-
-### `jwst_train` — Model training (triggered manually or weekly)
-1. Load embeddings + labels from DuckDB
-2. Train XGBoost classifier on ResNet features
-3. Fine-tune ResNet end-to-end (MPS backend)
-4. Save checkpoints to `models/`
+Local data pipeline on macOS (M4 MacBook Air) that ingests James Webb Space Telescope photos from Flickr, stores metadata and image embeddings in DuckDB, and trains image classifiers. Orchestrated by Apache Airflow via Astro CLI.
 
 ## Common Commands
 
 ```bash
-# Start local Airflow environment
+# Start/stop local Airflow (Docker-based)
 astro dev start
-
-# Stop
 astro dev stop
 
-# Trigger the ingest DAG manually
+# Trigger DAGs manually
 astro dev run airflow dags trigger jwst_flickr_ingest
+astro dev run airflow dags trigger jwst_feature_extraction
+astro dev run airflow dags trigger jwst_train_classifiers
 
-# Open Airflow UI
-open http://localhost:8080   # admin / admin
+# Airflow UI: http://localhost:8080  (admin / admin)
 
-# Query DuckDB (install with: brew install duckdb)
+# Tag consolidation (runs outside Airflow, on host)
+python include/tag_consolidation.py            # dry-run
+python include/tag_consolidation.py --apply    # write labels to DB
+
+# Streamlit explorer app
+streamlit run app.py
+
+# Query DuckDB directly
 duckdb include/jwst.duckdb "SELECT count(*) FROM photos"
-duckdb include/jwst.duckdb "SELECT photo_id, title, date_taken FROM photos LIMIT 5"
-
-# Reset watermark (re-ingest from scratch)
-duckdb include/jwst.duckdb "DELETE FROM photos"
 ```
 
-## Flickr API Notes
+There are no tests in this project.
 
-- Account: `nasawebbtelescope`
-- User lookup: `flickr.urls.lookupUser` with `https://www.flickr.com/photos/nasawebbtelescope/` (path alias — do NOT use `flickr.people.findByUsername`)
-- Relevant endpoints: `flickr.people.getPublicPhotos`, `flickr.photos.getSizes`, `flickr.photos.getInfo`
-- Rate limit: 3600 req/hour — DAG sleeps 0.3s between pages
+## Architecture
 
-## PyTorch / MPS Notes
-
-Always check MPS availability before falling back to CPU:
-
-```python
-import torch
-
-device = (
-    torch.device("mps") if torch.backends.mps.is_available()
-    else torch.device("cpu")
-)
+```
+Flickr API → jwst_flickr_ingest DAG → DuckDB (photos table) + include/images/
+                                            ↓
+                              jwst_feature_extraction DAG → embeddings in DuckDB
+                                            ↓
+                         tag_consolidation.py → canonical_label in DuckDB
+                                            ↓
+                         jwst_train_classifiers DAG → models/ + training_runs table
+                                            ↓
+                     predict_labels (end of ingest DAG) → predicted_label in DuckDB
 ```
 
-ResNet feature extraction (no grad, eval mode):
+### Key modules
 
-```python
-model = torchvision.models.resnet50(weights="IMAGENET1K_V2")
-model.fc = torch.nn.Identity()   # strip classifier head → 2048-dim output
-model = model.to(device).eval()
+- **`include/db.py`** — DuckDB connection helper (`get_conn()`) and `init_schema()`. All DB access goes through this. `DB_PATH` points to `include/jwst.duckdb`.
+- **`include/tag_consolidation.py`** — Maps Flickr tags to canonical labels using ordered `TAG_RULES`. First matching rule wins. Run as a standalone script, not an Airflow task.
+- **`app.py`** — Streamlit explorer (read-only DB connection). Four pages: Overview, Photo Browser, Similarity Search, Model Performance.
 
-with torch.no_grad():
-    embedding = model(img_tensor.unsqueeze(0).to(device))
+### DAGs (`dags/`)
+
+| DAG | Schedule | Purpose |
+|-----|----------|---------|
+| `jwst_flickr_ingest` | `@daily` | Fetch all Flickr IDs, diff against DB, download + upsert new photos, predict labels |
+| `jwst_feature_extraction` | `@daily` | ResNet50 embeddings for photos missing them (dynamic task mapping, batches of 32) |
+| `jwst_train_classifiers` | Manual | Parallel XGBoost + fine-tuned ResNet50 training → compare_models |
+
+### DuckDB Schema
+
+Two tables: `photos` (photo_id PK, title, description, tags TEXT[], image_path, date_taken, embedding FLOAT[] 2048-dim, canonical_label, predicted_label) and `training_runs` (run_id PK, ts, model_type, accuracy, f1_score, model_path).
+
+## Key Constraints
+
+- **Astro CLI mounts only `dags/`, `plugins/`, `include/`, `tests/`** — all data (DB, images, models, torch cache) lives under `include/` so it persists to the host filesystem.
+- **DuckDB is single-writer.** Use `get_conn(read_only=True)` for reads; serialize all writes through one task at a time.
+- **`docker-compose.override.yml` does NOT work with Astro CLI** — Astro generates its compose config internally.
+- **MPS backend for PyTorch** — always check `torch.backends.mps.is_available()` before falling back to CPU. DataLoader must use `num_workers=0` on macOS/MPS.
+- **Flickr API** — use `flickr.urls.lookupUser` with the path alias URL (not `flickr.people.findByUsername`). Rate limit: 3600 req/hr; DAG sleeps 0.3s between requests. Ingest DAG diffs all Flickr IDs against DB (no date-based watermark — Flickr `date_taken` is unreliable).
+- **DB image_path convention** — paths stored in DuckDB use the Docker-internal prefix (`/usr/local/airflow/include/images/`). The Streamlit app remaps via `local_image_path()` to the host path.
+- **Predictions below 0.6 confidence** are stored as `unclassified`.
+- **`PIL.Image.MAX_IMAGE_PIXELS = None`** must be set before opening JWST images (they exceed the default decompression bomb limit).
+- **ResNet fine-tuning** freezes layers 1-3, only trains layer4 + fc head. Uses differential LRs (1e-5 backbone / 1e-4 head) and class-weight balancing.
+
+## Environment
+
+Flickr API key in `.env` at project root (loaded automatically by Astro CLI):
 ```
+FLICKR_API_KEY=<your_key>
+```
+`.env` is gitignored. Never commit it.
 
-## Development Tips
+## Claude Code Instructions
 
-- DuckDB is single-writer. Serialize DB writes through a single task; use `read_only=True` for reads.
-- Store embeddings as `FLOAT[]` in DuckDB; use `.fetchnumpy()` to get numpy arrays for XGBoost.
-- Keep heavy ML dependencies (torch, xgboost) out of `requirements.txt` if they conflict with Airflow's Docker image — use a custom Dockerfile instead.
-- `docker-compose.override.yml` does NOT work with Astro CLI — Astro generates its compose config internally and does not write a base `docker-compose.yml` to the project directory, so overrides fail to load.
+- Never add `Co-Authored-By: Claude` or any Claude authorship attribution to git commits.
