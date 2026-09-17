@@ -1,6 +1,13 @@
-# JWST Image Pipeline
+# JWST Flickr Classifier
 
 **Author:** RK
+
+> **Superseded by [jwst-image-pipeline](https://github.com/RK-A1/jwst-image-pipeline).**
+> This project labelled photos from their Flickr tags, and Flickr strips the spaces out
+> of tags, so multi-word rules such as `star cluster` never matched. The model accuracy
+> below is measured against those tag labels, so it overstates real accuracy. The new
+> pipeline keeps this project's ingest and embeddings and labels photos from their
+> captions and images instead.
 
 A local pipeline that pulls James Webb Space Telescope photos from Flickr, extracts deep learning features, and trains image classifiers to categorise JWST imagery by subject type.
 
@@ -50,7 +57,7 @@ Predictions with confidence below 0.6 are stored as `unclassified` rather than f
 
 ```bash
 # 1. Clone
-git clone https://github.com/RK-A1/JWST.git && cd JWST
+git clone https://github.com/RK-A1/jwst-flickr-classifier.git && cd jwst-flickr-classifier
 
 # 2. Add your Flickr API key
 echo "FLICKR_API_KEY=your_key_here" > .env
